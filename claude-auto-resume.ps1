@@ -16,6 +16,7 @@ $TEST_WAIT_SECONDS = 0
 
 $script:CLEANUP_DONE = $false
 $script:CLAUDE_PROCESS = $null
+$script:CLAUDE_HELP_TEXT = $null
 
 function Cleanup-Resources {
   if ($script:CLEANUP_DONE) { return }
@@ -65,7 +66,9 @@ EXAMPLES:
     claude-auto-resume --cmd "python app.py"  # Executes after usage limit wait
     claude-auto-resume --test-mode 10 -e "echo test"  # [DEV] Test with 10s wait
 
-WARNING: Uses --dangerously-skip-permissions. Use only in trusted environments.
+WARNING: Uses Claude permission bypass mode when available
+         (--permission-mode bypassPermissions, otherwise --dangerously-skip-permissions).
+         Use only in trusted environments.
 WARNING: Custom command execution allows arbitrary shell commands. Use with caution.
 "@ | Write-Host
 }
@@ -82,6 +85,47 @@ function Check-NetworkConnectivity {
   return $false
 }
 
+function Get-ClaudeHelpText {
+  if ($null -ne $script:CLAUDE_HELP_TEXT) {
+    return $script:CLAUDE_HELP_TEXT
+  }
+
+  $script:CLAUDE_HELP_TEXT = & claude --help 2>$null
+  return $script:CLAUDE_HELP_TEXT
+}
+
+function Get-PermissionBypassArguments {
+  param([string]$HelpText)
+
+  if ($HelpText -match '--permission-mode' -and $HelpText -match 'bypassPermissions') {
+    return @('--permission-mode', 'bypassPermissions')
+  }
+
+  if ($HelpText -match '--dangerously-skip-permissions') {
+    return @('--dangerously-skip-permissions')
+  }
+
+  return @()
+}
+
+function Get-ClaudeResumeArguments {
+  param(
+    [string]$Prompt,
+    [bool]$UseContinueFlag,
+    [string]$HelpText
+  )
+
+  $arguments = @()
+  if ($UseContinueFlag) {
+    $arguments += '-c'
+  }
+
+  $arguments += Get-PermissionBypassArguments -HelpText $HelpText
+  $arguments += @('-p', $Prompt)
+
+  return $arguments
+}
+
 function Validate-ClaudeCLI {
   $cmd = Get-Command claude -ErrorAction SilentlyContinue
   if (-not $cmd) {
@@ -91,10 +135,11 @@ function Validate-ClaudeCLI {
     exit 1
   }
   try {
-    $help = & claude --help 2>$null
-    if ($help -notmatch 'dangerously-skip-permissions') {
-      Write-Host "[WARNING] Your Claude CLI version may not support --dangerously-skip-permissions flag."
-      Write-Host "[SUGGESTION] This script requires a recent version of Claude CLI. Please consider updating."
+    $help = Get-ClaudeHelpText
+    $bypassArgs = Get-PermissionBypassArguments -HelpText $help
+    if ($bypassArgs.Count -eq 0) {
+      Write-Host "[WARNING] Your Claude CLI version does not expose a supported permission bypass option."
+      Write-Host "[SUGGESTION] Update Claude CLI or review 'claude --help' for current startup flags."
       Write-Host "[DEBUG] Run 'claude --help' to see available options"
       Write-Host "The script will continue but may fail during execution."
     }
@@ -197,7 +242,7 @@ function Extract-OldFormatTimestamp {
 function Extract-NewFormatTimestamp {
   param([string]$ClaudeOutput)
 
-  $m = [regex]::Match($ClaudeOutput, 'resets\s+(\d+)(am|pm)', 'IgnoreCase')
+  $m = [regex]::Match($ClaudeOutput, 'resets\s+(\d+)(?::(\d+))?\s*(am|pm)(?:\s+\(([^)]+)\))?', 'IgnoreCase')
   if (-not $m.Success) {
     Write-Host "[ERROR] Failed to extract reset time from new Claude output format."
     Write-Host "[HINT] Expected format: 'X-hour limit reached - resets Xam/pm' or 'You've hit your limit  resets Xam/pm (Zone)'"
@@ -207,7 +252,11 @@ function Extract-NewFormatTimestamp {
   }
 
   $hour = [int]$m.Groups[1].Value
-  $period = $m.Groups[2].Value.ToLowerInvariant()
+  $minute = 0
+  if (-not [string]::IsNullOrEmpty($m.Groups[2].Value)) {
+    $minute = [int]$m.Groups[2].Value
+  }
+  $period = $m.Groups[3].Value.ToLowerInvariant()
 
   if ($period -eq 'am') {
     if ($hour -eq 12) { $hour = 0 }
@@ -215,15 +264,91 @@ function Extract-NewFormatTimestamp {
     if ($hour -ne 12) { $hour += 12 }
   }
 
-  $now = Get-Date
-  $todayReset = $now.Date.AddHours($hour)
-  if ($now -gt $todayReset) {
-    $resume = $todayReset.AddDays(1)
-  } else {
-    $resume = $todayReset
+  $timeZoneId = $m.Groups[4].Value.Trim()
+  $timeZone = [System.TimeZoneInfo]::Local
+
+  if (-not [string]::IsNullOrWhiteSpace($timeZoneId)) {
+    try {
+      $timeZone = [System.TimeZoneInfo]::FindSystemTimeZoneById($timeZoneId)
+    } catch {
+      $windowsId = $null
+      if ([System.TimeZoneInfo]::TryConvertIanaIdToWindowsId($timeZoneId, [ref]$windowsId)) {
+        $timeZone = [System.TimeZoneInfo]::FindSystemTimeZoneById($windowsId)
+      } else {
+        Write-Host "[WARNING] Failed to resolve timezone '$timeZoneId'. Falling back to local timezone."
+      }
+    }
   }
 
-  return [int64]([DateTimeOffset]$resume).ToUnixTimeSeconds()
+  $resumeUtc = Get-NextResetUtcTime -TimeZone $timeZone -Hour $hour -Minute $minute
+  return [DateTimeOffset]::new($resumeUtc).ToUnixTimeSeconds()
+}
+
+function Resolve-LocalTimeToUtcCandidates {
+  param(
+    [datetime]$LocalTime,
+    [System.TimeZoneInfo]$TimeZone
+  )
+
+  if ($TimeZone.IsInvalidTime($LocalTime)) {
+    $candidate = $LocalTime
+    for ($i = 0; $i -lt 180; $i++) {
+      $candidate = $candidate.AddMinutes(1)
+      if (-not $TimeZone.IsInvalidTime($candidate)) {
+        $offset = $TimeZone.GetUtcOffset($candidate)
+        return @([DateTimeOffset]::new($candidate, $offset).UtcDateTime)
+      }
+    }
+
+    throw "Unable to resolve invalid local time '$LocalTime' in timezone '$($TimeZone.Id)'."
+  }
+
+  if ($TimeZone.IsAmbiguousTime($LocalTime)) {
+    $offsets = $TimeZone.GetAmbiguousTimeOffsets($LocalTime) | Sort-Object
+    return @($offsets | ForEach-Object { [DateTimeOffset]::new($LocalTime, $_).UtcDateTime } | Sort-Object)
+  }
+
+  $offset = $TimeZone.GetUtcOffset($LocalTime)
+  return @([DateTimeOffset]::new($LocalTime, $offset).UtcDateTime)
+}
+
+function Get-NextResetUtcTime {
+  param(
+    [System.TimeZoneInfo]$TimeZone,
+    [int]$Hour,
+    [int]$Minute,
+    [DateTimeOffset]$ReferenceUtc = [DateTimeOffset]::UtcNow
+  )
+
+  $referenceInZone = [System.TimeZoneInfo]::ConvertTime($ReferenceUtc, $TimeZone)
+
+  for ($dayOffset = 0; $dayOffset -le 2; $dayOffset++) {
+    $candidateDate = $referenceInZone.Date.AddDays($dayOffset)
+    $candidateLocal = [datetime]::SpecifyKind(
+      [datetime]::new($candidateDate.Year, $candidateDate.Month, $candidateDate.Day, $Hour, $Minute, 0),
+      [DateTimeKind]::Unspecified
+    )
+
+    $candidateUtcTimes = Resolve-LocalTimeToUtcCandidates -LocalTime $candidateLocal -TimeZone $TimeZone
+    foreach ($candidateUtc in $candidateUtcTimes) {
+      if ($candidateUtc -gt $ReferenceUtc.UtcDateTime) {
+        return $candidateUtc
+      }
+    }
+  }
+
+  throw "Failed to calculate the next reset time for '${Hour}:${Minute}' in timezone '$($TimeZone.Id)'."
+}
+
+function Format-Countdown {
+  param([double]$SecondsRemaining)
+
+  $wholeSeconds = [int64][math]::Max([math]::Floor($SecondsRemaining), 0)
+  $hours = [int64][math]::Floor($wholeSeconds / 3600)
+  $minutes = [int64][math]::Floor(($wholeSeconds % 3600) / 60)
+  $seconds = [int64]($wholeSeconds % 60)
+
+  return ("{0:00}:{1:00}:{2:00}" -f $hours, $minutes, $seconds)
 }
 
 try {
@@ -280,14 +405,15 @@ try {
         if ($cmd) {
           Write-Host "  Status: Available"
           Write-Host "  Location: $($cmd.Source)"
-          $ver = & claude --version 2>$null
-          if (-not $ver) { $ver = 'Unknown' }
-          Write-Host "  Version: $ver"
-          $help = & claude --help 2>$null
-          if ($help -match 'dangerously-skip-permissions') {
-            Write-Host "  --dangerously-skip-permissions: Supported"
+        $ver = & claude --version 2>$null
+        if (-not $ver) { $ver = 'Unknown' }
+        Write-Host "  Version: $ver"
+          $help = Get-ClaudeHelpText
+          $bypassArgs = Get-PermissionBypassArguments -HelpText $help
+          if ($bypassArgs.Count -gt 0) {
+            Write-Host "  Permission bypass mode: $($bypassArgs -join ' ')"
           } else {
-            Write-Host "  --dangerously-skip-permissions: Not supported"
+            Write-Host "  Permission bypass mode: Not supported"
           }
         } else {
           Write-Host "  Status: Not found"
@@ -398,8 +524,8 @@ try {
   }
 
   $LIMIT_MSG = ''
-  $limitPattern = '(?i)(usage limit|limit reached|hit your limit).*resets'
-  $resetPattern = '(?i)resets\s+\d+(am|pm)'
+  $limitPattern = '(?i)(usage limit|limit reached|hit your.*limit).*resets'
+  $resetPattern = '(?i)resets\s+\d+(?::\d+)?\s*(am|pm)'
   if ($CLAUDE_OUTPUT -match $limitPattern -or $CLAUDE_OUTPUT -match $resetPattern) {
     $LIMIT_MSG = $CLAUDE_OUTPUT
   }
@@ -430,10 +556,7 @@ try {
       $resumeTime = [DateTimeOffset]::FromUnixTimeSeconds($resumeTs).LocalDateTime
       Write-Host ("Claude usage limit detected. Waiting until {0:yyyy-MM-dd HH:mm:ss}..." -f $resumeTime)
       while ($waitSeconds -gt 0) {
-        $h = [int]($waitSeconds / 3600)
-        $m = [int](($waitSeconds % 3600) / 60)
-        $s = [int]($waitSeconds % 60)
-        Write-Host -NoNewline ("`rResuming in {0:00}:{1:00}:{2:00}..." -f $h, $m, $s)
+        Write-Host -NoNewline ("`rResuming in {0}..." -f (Format-Countdown -SecondsRemaining $waitSeconds))
         Start-Sleep -Seconds 1
         $nowTs = [DateTimeOffset]::Now.ToUnixTimeSeconds()
         $waitSeconds = [int]($resumeTs - $nowTs)
@@ -463,13 +586,13 @@ try {
       }
       Write-Host "Custom command has been executed successfully."
     } else {
+      $resumeArgs = Get-ClaudeResumeArguments -Prompt $CUSTOM_PROMPT -UseContinueFlag $USE_CONTINUE_FLAG -HelpText (Get-ClaudeHelpText)
       if ($USE_CONTINUE_FLAG) {
         Write-Host "Automatically continuing previous Claude conversation with prompt: '$CUSTOM_PROMPT'"
-        $res2 = Invoke-ProcessWithTimeout -FilePath 'claude' -Arguments @('-c','--dangerously-skip-permissions','-p',"$CUSTOM_PROMPT") -TimeoutSeconds 0
       } else {
         Write-Host "Automatically starting new Claude session with prompt: '$CUSTOM_PROMPT'"
-        $res2 = Invoke-ProcessWithTimeout -FilePath 'claude' -Arguments @('--dangerously-skip-permissions','-p',"$CUSTOM_PROMPT") -TimeoutSeconds 0
       }
+      $res2 = Invoke-ProcessWithTimeout -FilePath 'claude' -Arguments $resumeArgs -TimeoutSeconds 0
       $RET_CODE2 = $res2.ExitCode
       $CLAUDE_OUTPUT2 = $res2.Output
 
@@ -512,4 +635,3 @@ try {
 finally {
   Cleanup-Resources
 }
-
