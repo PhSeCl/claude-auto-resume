@@ -4,8 +4,6 @@
 
 [English](README.md) | 中文
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F1F11HO935)
-
 ## ⚠️ 安全警告
 
 **此脚本在执行 Claude 命令时使用 `--dangerously-skip-permissions` 标志，并可执行任意 Shell 命令**，这意味着：
@@ -307,11 +305,5 @@ claude-auto-resume/
 1. 查看现有的[问题](https://github.com/terryso/claude-auto-resume/issues)
 2. 创建一个新的问题描述问题
 3. 或提交一个 Pull Request
-
-## ⭐ Star 历史
-
-[![Star History Chart](https://api.star-history.com/svg?repos=terryso/claude-auto-resume&type=Date)](https://www.star-history.com/#terryso/claude-auto-resume&Date)
-
----
 
 **注意**：此工具依赖于 Claude CLI 输出格式。如果 Claude CLI 更新改变了输出格式，可能需要更新脚本。 

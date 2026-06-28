@@ -1,18 +1,8 @@
 # Claude Auto-Resume
 
-[![BMAD](https://bmad-badge.vercel.app/terryso/claude-auto-resume.svg)](https://github.com/bmad-code-org/BMAD-METHOD)
-
 A shell script utility that automatically resumes Claude CLI tasks when usage limits are lifted, or executes custom shell commands after waiting periods. It detects Claude usage restrictions, waits intelligently, and resumes task execution automatically.
 
 English | [中文](README_zh.md)
-
-### Claude/Codex 拼车服务
-
-| 平台 | 类型 | 服务 | 扫码拼团 |
-|:---|:---|:---|:---|
-| **ctok.ai** | 🤝 合作伙伴 | <small>✅ Claude Code<br>✅ Codex CLI</small> | ![](https://i.v2ex.co/iBD4Qn0m.png) |
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F1F11HO935)
 
 ## ⚠️ SECURITY WARNING
 
@@ -316,11 +306,5 @@ If you encounter issues or have suggestions:
 1. Check existing [Issues](https://github.com/terryso/claude-auto-resume/issues)
 2. Create a new Issue describing the problem
 3. Or submit a Pull Request
-
-## ⭐ Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=terryso/claude-auto-resume&type=Date)](https://www.star-history.com/#terryso/claude-auto-resume&Date)
-
----
 
 **Note**: This tool depends on Claude CLI output format. If Claude CLI updates change the output format, the script may need to be updated.
