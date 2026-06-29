@@ -150,4 +150,49 @@ Assert-SequenceEqual -Name 'builds new session arguments with legacy permission 
 Write-Host 'PASS: builds new session arguments with legacy permission flag'
 $passed++
 
+function Assert-True {
+  param(
+    [string]$Name,
+    [bool]$Condition
+  )
+
+  if (-not $Condition) {
+    throw "$Name failed."
+  }
+}
+
+$psi = New-ClaudeProcessStartInfo -FilePath 'claude' -Arguments @('-c', '-p', 'continue task')
+Assert-Equal -Name 'process start info stores file path' -Actual $psi.FileName -Expected 'claude'
+Write-Host 'PASS: process start info stores file path'
+$passed++
+
+Assert-SequenceEqual -Name 'process start info preserves argument boundaries' -Actual @($psi.ArgumentList) -Expected @('-c', '-p', 'continue task')
+Write-Host 'PASS: process start info preserves argument boundaries'
+$passed++
+
+$utf8 = [System.Text.Encoding]::UTF8
+Assert-True -Name 'process start info sets stdout to UTF-8' -Condition ($psi.StandardOutputEncoding.WebName -eq $utf8.WebName)
+Write-Host 'PASS: process start info sets stdout to UTF-8'
+$passed++
+
+Assert-True -Name 'process start info sets stderr to UTF-8' -Condition ($psi.StandardErrorEncoding.WebName -eq $utf8.WebName)
+Write-Host 'PASS: process start info sets stderr to UTF-8'
+$passed++
+
+$interactiveOutput = & {
+  Invoke-InteractiveProcess -FilePath 'pwsh' -Arguments @('-NoProfile', '-Command', 'Write-Output ''继续 工作''; exit 0')
+  [pscustomobject]@{
+    ExitCode = $LASTEXITCODE
+  }
+} 2>&1
+$interactiveText = (($interactiveOutput | Where-Object { $_ -is [string] }) -join '').Trim()
+$interactiveExit = ($interactiveOutput | Where-Object { $_ -is [System.Management.Automation.PSCustomObject] })[0].ExitCode
+Assert-Equal -Name 'interactive process preserves UTF-8 output' -Actual $interactiveText.Trim() -Expected '继续 工作'
+Write-Host 'PASS: interactive process preserves UTF-8 output'
+$passed++
+
+Assert-Equal -Name 'interactive process returns exit code' -Actual $interactiveExit -Expected 0
+Write-Host 'PASS: interactive process returns exit code'
+$passed++
+
 Write-Host "Passed $passed PowerShell time parsing tests."

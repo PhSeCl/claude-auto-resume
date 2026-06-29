@@ -148,6 +148,27 @@ function Validate-ClaudeCLI {
   }
 }
 
+function New-ClaudeProcessStartInfo {
+  param(
+    [string]$FilePath,
+    [string[]]$Arguments
+  )
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $FilePath
+  foreach ($argument in $Arguments) {
+    $null = $psi.ArgumentList.Add($argument)
+  }
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+  $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+
+  return $psi
+}
+
 function Invoke-ProcessWithTimeout {
   param(
     [string]$FilePath,
@@ -155,16 +176,8 @@ function Invoke-ProcessWithTimeout {
     [int]$TimeoutSeconds = 300
   )
 
-  $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = $FilePath
-  $psi.Arguments = ($Arguments -join ' ')
-  $psi.RedirectStandardOutput = $true
-  $psi.RedirectStandardError = $true
-  $psi.UseShellExecute = $false
-  $psi.CreateNoWindow = $true
-
   $p = New-Object System.Diagnostics.Process
-  $p.StartInfo = $psi
+  $p.StartInfo = New-ClaudeProcessStartInfo -FilePath $FilePath -Arguments $Arguments
   $null = $p.Start()
   $script:CLAUDE_PROCESS = $p
 
@@ -180,6 +193,15 @@ function Invoke-ProcessWithTimeout {
   $out = $p.StandardOutput.ReadToEnd()
   $err = $p.StandardError.ReadToEnd()
   return @{ ExitCode = $p.ExitCode; Output = ($out + $err) }
+}
+
+function Invoke-InteractiveProcess {
+  param(
+    [string]$FilePath,
+    [string[]]$Arguments
+  )
+
+  & $FilePath @Arguments
 }
 
 function Execute-CustomCommand {
@@ -592,21 +614,18 @@ try {
       } else {
         Write-Host "Automatically starting new Claude session with prompt: '$CUSTOM_PROMPT'"
       }
-      $res2 = Invoke-ProcessWithTimeout -FilePath 'claude' -Arguments $resumeArgs -TimeoutSeconds 0
-      $RET_CODE2 = $res2.ExitCode
-      $CLAUDE_OUTPUT2 = $res2.Output
+      Write-Host "Handing control to Claude..."
+      Invoke-InteractiveProcess -FilePath 'claude' -Arguments $resumeArgs
+      $RET_CODE2 = $LASTEXITCODE
 
       if ($RET_CODE2 -ne 0) {
         Write-Host "[ERROR] Claude CLI failed after resume."
         Write-Host "[HINT] This may indicate authentication issues or service problems."
         Write-Host "[SUGGESTION] Try running 'claude --help' to verify CLI is working properly."
         Write-Host "[DEBUG] Exit code: $RET_CODE2"
-        Write-Host "[DEBUG] Output: $CLAUDE_OUTPUT2"
         exit 4
       }
-      Write-Host "Task has been automatically resumed and completed."
-      Write-Host "CLAUDE_OUTPUT:"
-      Write-Host $CLAUDE_OUTPUT2
+      Write-Host "Claude session exited successfully."
     }
 
     exit 0
